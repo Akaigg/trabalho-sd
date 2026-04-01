@@ -37,29 +37,33 @@
 
   <script>
     async function loadCluster() {
-      const res = await fetch('/cluster');
-      const data = await res.json();
-      const cluster = document.getElementById('cluster');
-      cluster.innerHTML = '';
+      try {
+        const res = await fetch('/cluster');
+        const data = await res.json();
+        const cluster = document.getElementById('cluster');
+        cluster.innerHTML = '';
 
-      data.nodes.forEach(node => {
-        const roleClass = (node.role || 'offline').toLowerCase();
-        const history = (node.history || []).slice().reverse().map(item => `<li>${item}</li>`).join('');
-        const card = document.createElement('article');
-        card.className = `card ${roleClass}`;
-        card.innerHTML = `
-          <h3>${node.id}</h3>
-          <p><strong>Estado:</strong> <span class="badge ${roleClass}">${node.role || 'Sem resposta'}</span></p>
-          <p><strong>Termo:</strong> ${node.term ?? '-'}</p>
-          <p><strong>Líder visto:</strong> ${node.leader_id ?? '-'}</p>
-          <p><strong>Ativo:</strong> ${node.alive === false ? 'Não' : 'Sim'}</p>
-          <details>
-            <summary>Histórico</summary>
-            <ul>${history || '<li>Sem eventos</li>'}</ul>
-          </details>
-        `;
-        cluster.appendChild(card);
-      });
+        data.nodes.forEach(node => {
+          const roleClass = (node.role || 'offline').toLowerCase();
+          const history = (node.history || []).slice().reverse().map(item => `<li>${item}</li>`).join('');
+          const card = document.createElement('article');
+          card.className = `card ${roleClass}`;
+          card.innerHTML = `
+            <h3>${node.id}</h3>
+            <p><strong>Estado:</strong> <span class="badge ${roleClass}">${node.role || 'Sem resposta'}</span></p>
+            <p><strong>Termo:</strong> ${node.term ?? '-'}</p>
+            <p><strong>Líder visto:</strong> ${node.leader_id ?? '-'}</p>
+            <p><strong>Ativo:</strong> ${node.alive === false ? 'Não' : 'Sim'}</p>
+            <details>
+              <summary>Histórico</summary>
+              <ul>${history || '<li>Sem eventos</li>'}</ul>
+            </details>
+          `;
+          cluster.appendChild(card);
+        });
+      } catch (error) {
+        console.error("Erro ao carregar o estado do cluster:", error);
+      }
     }
 
     async function toggleNode() {
@@ -72,8 +76,15 @@
       await loadCluster();
     }
 
-    loadCluster();
-    setInterval(loadCluster, 2000);
+    // O loop recursivo garante que o frontend espera a resposta do backend 
+    // antes de agendar o próximo pedido, prevenindo sobrecarga e travamentos.
+    async function loopCluster() {
+      await loadCluster();
+      setTimeout(loopCluster, 2000);
+    }
+
+    // Inicia o ciclo de atualização
+    loopCluster();
   </script>
 </body>
 </html>

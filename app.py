@@ -5,12 +5,22 @@ import time
 import random
 import os
 import socket
+import concurrent.futures
 
 app = Flask(__name__)
 
 NODE_ID = os.getenv("NODE_ID", socket.gethostname())
 PORT = int(os.getenv("PORT", 5000))
-PEERS = [p.strip() for p in os.getenv("PEERS", "").split(",") if p.strip()]
+
+# Filtra o próprio nó da lista de peers para evitar auto-requisições
+raw_peers = os.getenv("PEERS", "").split(",")
+PEERS = []
+for p in raw_peers:
+    p = p.strip()
+    # Ignora strings vazias, o próprio ID e domínios k8s associados a si mesmo
+    if p and p != NODE_ID and not p.startswith(f"{NODE_ID}."):
+        PEERS.append(p)
+
 ELECTION_MIN = float(os.getenv("ELECTION_MIN", 3))
 ELECTION_MAX = float(os.getenv("ELECTION_MAX", 6))
 HEARTBEAT_INTERVAL = float(os.getenv("HEARTBEAT_INTERVAL", 1.5))
@@ -29,7 +39,6 @@ state = {
 
 lock = threading.Lock()
 
-
 def log_event(message: str) -> None:
     timestamp = time.strftime("%H:%M:%S")
     entry = f"[{timestamp}] {message}"
@@ -38,15 +47,12 @@ def log_event(message: str) -> None:
         state["history"].append(entry)
         state["history"] = state["history"][-30:]
 
-
 def majority_count() -> int:
     return ((len(PEERS) + 1) // 2) + 1
-
 
 @app.route("/")
 def dashboard():
     return render_template("index.html", node_id=NODE_ID)
-
 
 @app.route("/status", methods=["GET"])
 def status():
@@ -56,27 +62,32 @@ def status():
     snapshot["majority_needed"] = majority_count()
     return jsonify(snapshot)
 
-
 @app.route("/cluster", methods=["GET"])
 def cluster():
     nodes = []
-    local = requests.get(f"http://127.0.0.1:{PORT}/status", timeout=1).json()
-    nodes.append(local)
-    for peer in PEERS:
-        try:
-            data = requests.get(f"http://{peer}:{PORT}/status", timeout=1).json()
-            nodes.append(data)
-        except Exception as exc:
-            nodes.append({
-                "id": peer,
-                "role": "Unreachable",
-                "term": None,
-                "leader_id": None,
-                "alive": False,
-                "error": str(exc)
-            })
-    return jsonify({"nodes": nodes})
+    # Lê o estado local de forma segura e direta, sem fazer requisição HTTP a si mesmo
+    with lock:
+        local_snapshot = dict(state)
+    local_snapshot["peers"] = PEERS
+    local_snapshot["majority_needed"] = majority_count()
+    nodes.append(local_snapshot)
 
+    def fetch_peer(peer):
+        try:
+            return requests.get(f"http://{peer}:{PORT}/status", timeout=0.5).json()
+        except Exception as exc:
+            return {
+                "id": peer, "role": "Unreachable", "term": None,
+                "leader_id": None, "alive": False, "error": str(exc)
+            }
+
+    # Busca os status dos outros nós simultaneamente
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        results = executor.map(fetch_peer, PEERS)
+        for res in results:
+            nodes.append(res)
+            
+    return jsonify({"nodes": nodes})
 
 @app.route("/vote", methods=["POST"])
 def vote():
@@ -102,7 +113,6 @@ def vote():
 
         return jsonify({"vote_granted": False, "term": state["term"]})
 
-
 @app.route("/heartbeat", methods=["POST"])
 def heartbeat():
     data = request.json
@@ -120,7 +130,6 @@ def heartbeat():
                 log_event(f"Heartbeat recebido do líder {state['leader_id']} no termo {state['term']}")
     return jsonify({"status": "ok"})
 
-
 @app.route("/toggle", methods=["POST"])
 def toggle_alive():
     with lock:
@@ -134,7 +143,6 @@ def toggle_alive():
             state["last_heartbeat"] = time.time()
             log_event("Nó reativado")
         return jsonify({"alive": state["alive"]})
-
 
 @app.route("/reset", methods=["POST"])
 def reset_node():
@@ -150,7 +158,6 @@ def reset_node():
     log_event("Nó reiniciado")
     return jsonify({"status": "resetado"})
 
-
 def request_votes():
     with lock:
         if not state["alive"]:
@@ -164,53 +171,59 @@ def request_votes():
 
     log_event(f"Eleição iniciada no termo {current_term}")
 
-    for peer in PEERS:
+    def ask_vote(peer):
         try:
             response = requests.post(
                 f"http://{peer}:{PORT}/vote",
                 json={"term": current_term, "candidate_id": NODE_ID},
-                timeout=1.5,
+                timeout=1.0,
             )
             if response.ok and response.json().get("vote_granted"):
                 with lock:
                     state["votes"] += 1
         except Exception:
-            continue
+            pass
+
+    # Realiza pedidos de votos concorrentes para não perder tempo aguardando falhas de rede
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        list(executor.map(ask_vote, PEERS))
 
     with lock:
         if state["role"] == "Candidate" and state["votes"] >= majority_count():
             state["role"] = "Leader"
             state["leader_id"] = NODE_ID
             log_event(f"Virou líder com {state['votes']} votos no termo {state['term']}")
+            # Ao se eleger, anuncia a autoridade instantaneamente 
+            threading.Thread(target=broadcast_heartbeats, daemon=True).start()
         elif state["role"] == "Candidate":
             state["role"] = "Follower"
             log_event(f"Não conseguiu maioria no termo {state['term']}")
 
+def broadcast_heartbeats():
+    with lock:
+        if state["role"] != "Leader" or not state["alive"]:
+            return
+        current_term = state["term"]
 
+    for peer in PEERS:
+        try:
+            requests.post(
+                f"http://{peer}:{PORT}/heartbeat",
+                json={"term": current_term, "leader_id": NODE_ID},
+                timeout=1.0,
+            )
+        except Exception:
+            pass
 
 def send_heartbeats():
     while True:
         time.sleep(HEARTBEAT_INTERVAL)
-        with lock:
-            if state["role"] != "Leader" or not state["alive"]:
-                continue
-            current_term = state["term"]
-
-        for peer in PEERS:
-            try:
-                requests.post(
-                    f"http://{peer}:{PORT}/heartbeat",
-                    json={"term": current_term, "leader_id": NODE_ID},
-                    timeout=1,
-                )
-            except Exception:
-                pass
-
-
+        broadcast_heartbeats()
 
 def election_timer():
+    # Sorteia o timeout apenas no início ou fim de um ciclo (mantém a aleatoriedade efetiva)
+    timeout = random.uniform(ELECTION_MIN, ELECTION_MAX)
     while True:
-        timeout = random.uniform(ELECTION_MIN, ELECTION_MAX)
         time.sleep(0.5)
         with lock:
             elapsed = time.time() - state["last_heartbeat"]
@@ -221,10 +234,11 @@ def election_timer():
             request_votes()
             with lock:
                 state["last_heartbeat"] = time.time()
-
+            # Sorteia um novo tempo de espera caso a eleição falhe/termine
+            timeout = random.uniform(ELECTION_MIN, ELECTION_MAX)
 
 if __name__ == "__main__":
     threading.Thread(target=election_timer, daemon=True).start()
     threading.Thread(target=send_heartbeats, daemon=True).start()
-    log_event(f"Nó {NODE_ID} iniciado na porta {PORT}")
+    log_event(f"Nó {NODE_ID} iniciado na porta {PORT} com peers: {PEERS}")
     app.run(host="0.0.0.0", port=PORT, threaded=True)
