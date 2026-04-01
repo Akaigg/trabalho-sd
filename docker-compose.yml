@@ -1,0 +1,28 @@
+services:
+  node1:
+    build: .
+    container_name: raft-node1
+    environment:
+      NODE_ID: node1
+      PORT: 5000
+      PEERS: node2,node3
+    ports:
+      - "5001:5000"
+  node2:
+    build: .
+    container_name: raft-node2
+    environment:
+      NODE_ID: node2
+      PORT: 5000
+      PEERS: node1,node3
+    ports:
+      - "5002:5000"
+  node3:
+    build: .
+    container_name: raft-node3
+    environment:
+      NODE_ID: node3
+      PORT: 5000
+      PEERS: node1,node2
+    ports:
+      - "5003:5000"

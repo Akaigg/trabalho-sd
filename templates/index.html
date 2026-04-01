@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Painel Raft</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>Painel Visual do Raft</h1>
+    <p>Nó atual: <strong>{{ node_id }}</strong></p>
+  </header>
+
+  <main>
+    <section class="toolbar">
+      <button onclick="toggleNode()">Simular falha / reativar este nó</button>
+      <button onclick="resetNode()">Reiniciar este nó</button>
+      <button onclick="loadCluster()">Atualizar agora</button>
+    </section>
+
+    <section>
+      <h2>Visão do cluster</h2>
+      <div id="cluster" class="grid"></div>
+    </section>
+
+    <section>
+      <h2>Legenda</h2>
+      <div class="legend">
+        <span class="badge leader">Leader</span>
+        <span class="badge follower">Follower</span>
+        <span class="badge candidate">Candidate</span>
+        <span class="badge offline">Offline / Unreachable</span>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    async function loadCluster() {
+      const res = await fetch('/cluster');
+      const data = await res.json();
+      const cluster = document.getElementById('cluster');
+      cluster.innerHTML = '';
+
+      data.nodes.forEach(node => {
+        const roleClass = (node.role || 'offline').toLowerCase();
+        const history = (node.history || []).slice().reverse().map(item => `<li>${item}</li>`).join('');
+        const card = document.createElement('article');
+        card.className = `card ${roleClass}`;
+        card.innerHTML = `
+          <h3>${node.id}</h3>
+          <p><strong>Estado:</strong> <span class="badge ${roleClass}">${node.role || 'Sem resposta'}</span></p>
+          <p><strong>Termo:</strong> ${node.term ?? '-'}</p>
+          <p><strong>Líder visto:</strong> ${node.leader_id ?? '-'}</p>
+          <p><strong>Ativo:</strong> ${node.alive === false ? 'Não' : 'Sim'}</p>
+          <details>
+            <summary>Histórico</summary>
+            <ul>${history || '<li>Sem eventos</li>'}</ul>
+          </details>
+        `;
+        cluster.appendChild(card);
+      });
+    }
+
+    async function toggleNode() {
+      await fetch('/toggle', { method: 'POST' });
+      await loadCluster();
+    }
+
+    async function resetNode() {
+      await fetch('/reset', { method: 'POST' });
+      await loadCluster();
+    }
+
+    loadCluster();
+    setInterval(loadCluster, 2000);
+  </script>
+</body>
+</html>
